@@ -15,7 +15,7 @@ gatherUsageStats = false
 [server]
 headless = true 
 runOnSave = true
-address = "0.0.0.0"
+address = "localhost"
 showEmailPrompt = false
 enableCORS = false
 enableXsrfProtection = false
