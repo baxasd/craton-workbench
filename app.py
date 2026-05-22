@@ -18,7 +18,19 @@ if __name__ == "__main__":
         "run", 
         "core/main.py", 
         "--global.developmentMode=false", 
-        "--logger.level=error"
+        "--logger.level=error",
+        "--client.toolbarMode=viewer",
+        "--browser.gatherUsageStats=false",
+        "--server.headless=true",
+        "--server.address=localhost",
+        "--server.showEmailPrompt=false",
+        "--server.enableCORS=false",
+        "--server.enableXsrfProtection=false",
+        "--theme.primaryColor=#005FB8",
+        "--theme.backgroundColor=#FFFFFF",
+        "--theme.secondaryBackgroundColor=#F0F2F6",
+        "--theme.textColor=#262730",
+        "--theme.font=inter"
     ]        
     
     Timer(1.5, open_browser).start()

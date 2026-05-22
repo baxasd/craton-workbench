@@ -39,28 +39,32 @@ else:
     ROOT_DIR = os.path.abspath(os.path.join(_current_dir, '..'))
     BASE_DIR = ROOT_DIR
 
+LOGO_PATH = os.path.join(ROOT_DIR, 'assets', 'logo.png')
+ICON_PATH = os.path.join(ROOT_DIR, 'assets', 'icon.ico')
+COMMAND_ICON = os.path.join(ROOT_DIR, 'assets', 'command.ico')
 RADAR_CFG_PATH = os.path.join(ROOT_DIR, 'core', 'config.cfg')
+APP_VERSION = "v1.1.1"
 
 # =============================================================================
-# 2. DATA STRUCTURES
+# 2. DATA STRUCTURES (MediaPipe Topology mapped to Math Engine Names)
 # =============================================================================
 
 POSE_LANDMARKS = {
-    0: "pelvis", 1: "spine_navel", 2: "spine_chest", 3: "neck",
-    4: "clavicle_left", 5: "shoulder_left", 6: "elbow_left", 7: "wrist_left",
-    8: "hand_left", 9: "handtip_left", 10: "thumb_left",
-    11: "clavicle_right", 12: "shoulder_right", 13: "elbow_right", 14: "wrist_right",
-    15: "hand_right", 16: "handtip_right", 17: "thumb_right",
-    18: "hip_left", 19: "knee_left", 20: "ankle_left", 21: "foot_left",
-    22: "hip_right", 23: "knee_right", 24: "ankle_right", 25: "foot_right",
-    26: "head", 27: "nose", 28: "eye_left", 29: "ear_left",
-    30: "eye_right", 31: "ear_right"
+    0: "nose", 1: "left_eye_inner", 2: "left_eye", 3: "left_eye_outer",
+    4: "right_eye_inner", 5: "right_eye", 6: "right_eye_outer",
+    7: "left_ear", 8: "right_ear", 9: "mouth_left", 10: "mouth_right",
+    11: "left_shoulder", 12: "right_shoulder", 13: "left_elbow", 14: "right_elbow",
+    15: "left_wrist", 16: "right_wrist", 17: "left_pinky", 18: "right_pinky",
+    19: "left_index", 20: "right_index", 21: "left_thumb", 22: "right_thumb",
+    23: "left_hip", 24: "right_hip", 25: "left_knee", 26: "right_knee",
+    27: "left_ankle", 28: "right_ankle", 29: "left_heel", 30: "right_heel",
+    31: "left_foot_index", 32: "right_foot_index"
 }
 
 NAME_TO_ID = {v: k for k, v in POSE_LANDMARKS.items()}
 
 def identify_joint_columns(columns: List[str]) -> List[str]:
-    return [c for c in columns if c.endswith('_x') and (c.startswith('j') or c.startswith('joint'))]
+    return [c for c in columns if c.endswith('_x') and (c.startswith('joint_') or (c.startswith('j') and c[1:2].isdigit()))]
 
 @dataclass
 class Joint:
@@ -95,9 +99,13 @@ def df_to_session(df: pd.DataFrame) -> Session:
     parsed_columns = []
     for col in x_cols:
         prefix = col[:-2] 
-        idx = int(prefix.split('_')[1]) if 'joint_' in prefix else int(prefix[1:])
+        try:
+            if 'joint_' in prefix: idx = int(prefix.split('_')[1])
+            else: idx = int(prefix[1:])
+        except: continue
         real_name = POSE_LANDMARKS.get(idx, str(idx))
         parsed_columns.append((prefix, idx, real_name))
+        
     for i, row in enumerate(records):
         raw_ts = row.get('timestamp') or row.get('Timestamp') or row.get('time') or 0.0
         try:
@@ -109,9 +117,14 @@ def df_to_session(df: pd.DataFrame) -> Session:
                 if start_time is None: start_time = dt
                 ts = (dt - start_time).total_seconds()
         except: ts = float(i) * 0.033 
+        
         f = Frame(timestamp=ts, frame_id=int(i))
         for prefix, idx, real_name in parsed_columns:
-            f.joints[idx] = Joint(name=real_name, metric=(float(row.get(f'{prefix}_x', 0.0)), float(row.get(f'{prefix}_y', 0.0)), float(row.get(f'{prefix}_z', 0.0))))
+            f.joints[idx] = Joint(name=real_name, metric=(
+                float(row.get(f'{prefix}_x', 0.0)), 
+                float(row.get(f'{prefix}_y', 0.0)), 
+                float(row.get(f'{prefix}_z', 0.0))
+            ))
         sess.frames.append(f)
     return sess
 
@@ -171,7 +184,7 @@ class PipelineProcessor:
         return df_proc
 
 # =============================================================================
-# 4. KINEMATICS
+# 4. KINEMATICS (Math Engine Restoration from motion.py)
 # =============================================================================
 
 def _get_vec(frame: Frame, name_or_id):
@@ -181,42 +194,58 @@ def _get_vec(frame: Frame, name_or_id):
     return np.array([j.metric[0], j.metric[1], j.metric[2]])
 
 def _get_trunk_midpoints(f: Frame):
-    pts = [_get_vec(f, n) for n in ["hip_right", "hip_left", "shoulder_right", "shoulder_left"]]
-    if any(v is None for v in pts): return None, None
-    return (pts[0] + pts[1]) / 2.0, (pts[2] + pts[3]) / 2.0
+    rh, lh = _get_vec(f, "right_hip"), _get_vec(f, "left_hip")
+    rs, ls = _get_vec(f, "right_shoulder"), _get_vec(f, "left_shoulder")
+    if any(v is None for v in [rh, lh, rs, ls]): return None, None
+    return (rh + lh) / 2.0, (rs + ls) / 2.0
 
 def calculate_joint_angle(f: Frame, p1: str, p2: str, p3: str) -> float:
     a, b, c = _get_vec(f, p1), _get_vec(f, p2), _get_vec(f, p3)
     if any(v is None for v in [a, b, c]): return 0.0
     ba, bc = a - b, c - b
     na, nc = np.linalg.norm(ba), np.linalg.norm(bc)
-    if na < 1e-4 or nc < 1e-4: return 0.0
+    if na == 0 or nc == 0: return 0.0
     return float(np.degrees(np.arccos(np.clip(np.dot(ba, bc) / (na * nc), -1.0, 1.0))))
 
-def calculate_trunk_lean(f: Frame) -> tuple[float, float]:
-    m_hip, m_sho = _get_trunk_midpoints(f)
-    leans = []
-    for h, s in [(m_hip, m_sho), (_get_vec(f, "hip_left"), _get_vec(f, "shoulder_left")), (_get_vec(f, "hip_right"), _get_vec(f, "shoulder_right"))]:
-        if h is not None and s is not None: leans.append(np.degrees(np.arctan2(s[0]-h[0], -(s[1]-h[1]))))
-    lx = float(np.mean(leans)) if leans else 0.0
-    lz = np.degrees(np.arctan2(m_sho[2]-m_hip[2], -(m_sho[1]-m_hip[1]))) if m_hip is not None and m_sho is not None else 0.0
-    return lx, float(lz)
+def calculate_frontal_lean(f: Frame) -> float:
+    """Forward/Backward Lean (X-Y Plane)"""
+    mid_hip, mid_shoulder = _get_trunk_midpoints(f)
+    if mid_hip is None: return 0.0
+    dx = mid_shoulder[0] - mid_hip[0]
+    dy = mid_shoulder[1] - mid_hip[1]
+    return float(np.degrees(np.arctan2(dx, -dy)))
+
+def calculate_sagittal_lean(f: Frame) -> float:
+    """Side-to-Side Lean (Z-Y Plane) using the Right side"""
+    rh, rs = _get_vec(f, "right_hip"), _get_vec(f, "right_shoulder")
+    if rh is None or rs is None: return 0.0
+    dz = rs[2] - rh[2]
+    dy = rs[1] - rh[1]
+    return float(np.degrees(np.arctan2(dz, -dy)))
 
 def compute_all_metrics(f: Frame) -> dict:
-    lx, _ = calculate_trunk_lean(f)
-    la, ra = _get_vec(f, "ankle_left"), _get_vec(f, "ankle_right")
+    la, ra = _get_vec(f, "left_ankle"), _get_vec(f, "right_ankle")
     m_hip, _ = _get_trunk_midpoints(f)
+    
     return {
-        'lean_x': lx, 'ankle_dist': float(np.linalg.norm(la - ra)) if la is not None and ra is not None else 0.0,
-        'l_knee': calculate_joint_angle(f, "hip_left", "knee_left", "ankle_left"),
-        'r_knee': calculate_joint_angle(f, "hip_right", "knee_right", "ankle_right"),
-        'l_hip':  calculate_joint_angle(f, "pelvis", "hip_left", "knee_left"),
-        'r_hip':  calculate_joint_angle(f, "pelvis", "hip_right", "knee_right"),
-        'l_sho':  calculate_joint_angle(f, "spine_chest", "shoulder_left", "elbow_left"),
-        'r_sho':  calculate_joint_angle(f, "spine_chest", "shoulder_right", "elbow_right"),
-        'l_elb':  calculate_joint_angle(f, "shoulder_left", "elbow_left", "wrist_left"),
-        'r_elb':  calculate_joint_angle(f, "shoulder_right", "elbow_right", "wrist_right"),
-        'com_y': m_hip[1] if m_hip is not None else 0.0, 'drift_x': m_hip[0] if m_hip is not None else 0.0
+        'lean_x': calculate_frontal_lean(f),
+        'step_width': abs(la[0] - ra[0]) if la is not None and ra is not None else 0.0,
+        'ankle_dist': float(np.linalg.norm(la - ra)) if la is not None and ra is not None else 0.0,
+        
+        'l_knee': calculate_joint_angle(f, "left_hip", "left_knee", "left_ankle"),
+        'r_knee': calculate_joint_angle(f, "right_hip", "right_knee", "right_ankle"),
+        
+        'l_hip':  calculate_joint_angle(f, "left_shoulder", "left_hip", "left_knee"),
+        'r_hip':  calculate_joint_angle(f, "right_shoulder", "right_hip", "right_knee"),
+        
+        'l_sho':  calculate_joint_angle(f, "left_hip", "left_shoulder", "left_elbow"),
+        'r_sho':  calculate_joint_angle(f, "right_hip", "right_shoulder", "right_elbow"),
+        
+        'l_elb':  calculate_joint_angle(f, "left_shoulder", "left_elbow", "left_wrist"),
+        'r_elb':  calculate_joint_angle(f, "right_shoulder", "right_elbow", "right_wrist"),
+        
+        'com_y': m_hip[1] if m_hip is not None else 0.0, 
+        'drift_x': m_hip[0] if m_hip is not None else 0.0
     }
 
 def generate_analysis_report(session):
@@ -226,13 +255,20 @@ def generate_analysis_report(session):
         m.update({'timestamp': f.timestamp, 'frame': f.frame_id})
         data.append(m)
     df = pd.DataFrame(data)
-    for col in ['l_knee', 'r_knee', 'l_hip', 'r_hip', 'l_sho', 'r_sho', 'l_elb', 'r_elb']:
-        if col in df.columns: df[f'{col}_rom'] = df[col].rolling(30, center=True).max() - df[col].rolling(30, center=True).min()
+    
+    angle_cols = ['l_knee', 'r_knee', 'l_hip', 'r_hip', 'l_sho', 'r_sho', 'l_elb', 'r_elb']
+    for col in angle_cols:
+        if col in df.columns: 
+            df[f'{col}_rom'] = df[col].rolling(30, center=True).max() - df[col].rolling(30, center=True).min()
+            
     stats = df.drop(columns=['timestamp', 'frame']).describe()
+    
     if 'ankle_dist' in df.columns and len(df) > 60:
         y = df['ankle_dist'].rolling(10, center=True).mean().fillna(0).values
-        peaks, _ = find_peaks(y - np.mean(y), distance=10)
-        stats.loc['mean', 'SPM'] = (len(peaks) / ((df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]) / 60.0)) if len(peaks) > 1 else 0.0
+        peaks, _ = find_peaks(y - np.mean(y), distance=10, prominence=0.05)
+        duration_min = (df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]) / 60.0
+        stats.loc['mean', 'SPM'] = (len(peaks) / duration_min) if duration_min > 0 and len(peaks) > 1 else 0.0
+        
     return df, stats
 
 # =============================================================================
