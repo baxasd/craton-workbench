@@ -5,10 +5,12 @@ import logging
 import struct
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from datetime import datetime
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, butter, filtfilt, welch
+from scipy.ndimage import uniform_filter1d
 
 # =============================================================================
 # 1. CONSTANTS & THEME
@@ -37,14 +39,10 @@ else:
     ROOT_DIR = os.path.abspath(os.path.join(_current_dir, '..'))
     BASE_DIR = ROOT_DIR
 
-LOGO_PATH = os.path.join(ROOT_DIR, 'assets', 'logo.png')
-ICON_PATH = os.path.join(ROOT_DIR, 'assets', 'icon.ico')
-COMMAND_ICON = os.path.join(ROOT_DIR, 'assets', 'command.ico')
 RADAR_CFG_PATH = os.path.join(ROOT_DIR, 'core', 'config.cfg')
-APP_VERSION = "v1.0.0"
 
 # =============================================================================
-# 2. DATA STRUCTURES (formerly types.py)
+# 2. DATA STRUCTURES
 # =============================================================================
 
 POSE_LANDMARKS = {
@@ -118,7 +116,7 @@ def df_to_session(df: pd.DataFrame) -> Session:
     return sess
 
 # =============================================================================
-# 3. DSP FILTERS (formerly filter.py)
+# 3. DSP FILTERS
 # =============================================================================
 
 class PipelineProcessor:
@@ -173,7 +171,7 @@ class PipelineProcessor:
         return df_proc
 
 # =============================================================================
-# 4. KINEMATICS (formerly motion.py)
+# 4. KINEMATICS
 # =============================================================================
 
 def _get_vec(frame: Frame, name_or_id):
@@ -238,7 +236,7 @@ def generate_analysis_report(session):
     return df, stats
 
 # =============================================================================
-# 5. RADAR CONFIG (formerly radar_parse.py)
+# 5. RADAR PROCESSING
 # =============================================================================
 
 class RadarConfig:
@@ -264,3 +262,82 @@ class RadarConfig:
         self.dopRes = 3e8 / (2 * fc * Tc * nc)
         self.dopMax, self.T = nc * self.dopRes / 2, fr["periodicity"]
         self.frameRate = 1e3 / self.T
+
+class RecordingSession:
+    def __init__(self, filepath: str, cfg: RadarConfig):
+        self.filepath = filepath
+        self.cfg = cfg
+        self.frames, self.timestamps = [], []
+        self._load()
+
+    def _load(self):
+        df = pq.read_table(self.filepath).to_pandas()
+        if self.cfg is None: return
+        exp = self.cfg.numRangeBins * self.cfg.numLoops
+        for raw_bytes, ts in zip(df['rdhm_bytes'], df['timestamp']):
+            raw = np.frombuffer(raw_bytes, dtype=np.uint16)
+            if raw.size == exp:
+                self.frames.append(raw.astype(np.float32).reshape(self.cfg.numRangeBins, self.cfg.numLoops))
+                self.timestamps.append(float(ts))
+
+    @property
+    def num_frames(self): return len(self.frames)
+    @property
+    def duration_s(self): return (self.timestamps[-1] - self.timestamps[0]) if len(self.timestamps) > 1 else 0.0
+
+    def build_spectrogram(self, gate_lo_m, gate_hi_m, smooth_t=2):
+        from scipy.ndimage import uniform_filter1d, zoom
+        if not self.frames or self.cfg is None: return np.zeros((10,10)), np.zeros(10), np.zeros(10), np.zeros(10)
+        cfg, nv = self.cfg, self.cfg.numLoops
+        lo, hi = max(0, int(gate_lo_m / cfg.rangeRes)), min(cfg.numRangeBins, max(int(gate_lo_m/cfg.rangeRes)+1, int(gate_hi_m/cfg.rangeRes)))
+        v_coarse = np.linspace(-cfg.dopMax, cfg.dopMax, nv, dtype=np.float32)
+        spec_lin = np.abs(np.fft.fftshift(np.array(self.frames)[:, lo:hi, :].max(axis=1), axes=1))
+        weights = np.maximum(spec_lin - np.percentile(spec_lin, 30, axis=1, keepdims=True), 0.0)
+        w_sum = weights.sum(axis=1)
+        centroid = np.where(w_sum > 1e-9, (weights * v_coarse[np.newaxis, :]).sum(axis=1) / w_sum, 0.0).astype(np.float32)
+        spec_db = 20.0 * np.log10(spec_lin + 1e-9)
+        c_idx = nv // 2
+        clutter = np.percentile(np.delete(spec_db, [c_idx-1, c_idx, c_idx+1], axis=1), 99.0)
+        spec_db[:, c_idx-1:c_idx+2] = np.clip(spec_db[:, c_idx-1:c_idx+2], a_min=None, a_max=clutter)
+        if smooth_t > 1: spec_db = uniform_filter1d(spec_db, size=smooth_t, axis=0)
+        spec_db = zoom(spec_db, (1, 8), order=3)
+        return spec_db, np.array([t - self.timestamps[0] for t in self.timestamps], dtype=np.float32), np.linspace(-cfg.dopMax, cfg.dopMax, nv * 8, dtype=np.float32), centroid
+
+def analyze_gait_radar(time, velocity, cfg):
+    v_raw = velocity * cfg["velocity_scale"]
+    dt = float(np.mean(np.diff(time))) if len(time) > 1 else 0.1
+    if np.isnan(dt) or dt <= 0.0: dt = 0.1
+    fs = 1.0 / dt
+    try:
+        b, a = butter(4, min(cfg["lp_cutoff"]/(fs/2), 0.99), btype='low')
+        v_disp = filtfilt(b, a, v_raw)
+    except: v_disp = v_raw.copy()
+    try:
+        b, a = butter(2, max(cfg["hp_cutoff"]/(fs/2), 1e-4), btype='high')
+        v_ac = filtfilt(b, a, v_raw)
+        b, a = butter(4, min(cfg["lp_cutoff"]/(fs/2), 0.99), btype='low')
+        v_ac = filtfilt(b, a, v_ac)
+    except: v_ac = v_raw - np.mean(v_raw)
+    try:
+        f, pxx = welch(v_ac, fs, nperseg=min(len(v_ac), int(fs*8)))
+        idx = (f >= cfg["step_freq_min_hz"]/2) & (f <= cfg["step_freq_max_hz"]/2)
+        f_spm = f[idx][np.argmax(pxx[idx])] * 2 * 60 if np.any(idx) else 75.0
+    except: f_spm = 75.0
+    peaks, _ = find_peaks(v_ac, distance=max(1, int(fs*cfg["min_step_gap_s"])), prominence=max(float(np.std(v_ac))*cfg["prominence_factor"], 1e-5))
+    t_spm = (len(peaks) / (float(time[-1]-time[0]) if len(time)>1 else 1.0) * 60)
+    v_macro = v_disp - np.mean(v_disp)
+    disp = np.cumsum(v_macro * dt)
+    try:
+        b, a = butter(2, max(0.01/(fs/2), 1e-4), btype='high')
+        disp = filtfilt(b, a, disp)
+    except: disp = disp - np.mean(disp)
+    s_disp = uniform_filter1d(disp, size=max(1, int(fs*4.0)))
+    d_lim = cfg["drift_thresh_factor"] * float(np.std(s_disp))
+    s_a, s_b, cur = [], [], 0
+    exp_g = 1.0 / (f_spm/120.0)
+    for i, pk in enumerate(peaks):
+        if i > 0:
+            if round((time[pk] - time[peaks[i-1]]) / exp_g) % 2 == 1: cur ^= 1
+        (s_a if cur == 0 else s_b).append(pk)
+    a_asy = abs(np.mean(v_ac[s_a]) - np.mean(v_ac[s_b])) / ((abs(np.mean(v_ac[s_a])) + abs(np.mean(v_ac[s_b])))/2) * 100 if s_a and s_b else 0.0
+    return {"time": time, "v_ac": v_ac, "s_disp": s_disp, "peaks": peaks, "s_a": s_a, "s_b": s_b, "d_lim": d_lim, "steps": len(peaks), "t_spm": t_spm, "f_spm": f_spm, "asy": a_asy}
