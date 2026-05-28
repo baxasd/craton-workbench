@@ -9,14 +9,29 @@ def open_browser():
 
 if __name__ == "__main__":
     if getattr(sys, 'frozen', False):
-        os.chdir(sys._MEIPASS)
+        # In one-directory mode with contents_directory='libs'
+        # sys._MEIPASS is the root directory containing the executable.
+        root_dir = sys._MEIPASS
+        libs_dir = os.path.join(root_dir, 'libs')
+        
+        # Add libs to sys.path for the current process
+        if libs_dir not in sys.path:
+            sys.path.insert(0, libs_dir)
+        
+        # Ensure sub-processes (like streamlit workers) can find the libs
+        os.environ["PYTHONPATH"] = libs_dir + os.pathsep + os.environ.get("PYTHONPATH", "")
+        
+        os.chdir(root_dir)
+        script_path = os.path.join(libs_dir, "core", "main.py")
+    else:
+        script_path = "core/main.py"
 
-    print("Launching...")
+    print(f"Launching from: {script_path}")
     
     sys.argv = [
         "streamlit", 
         "run", 
-        "core/main.py", 
+        script_path, 
         "--global.developmentMode=false", 
         "--logger.level=error",
         "--client.toolbarMode=viewer",

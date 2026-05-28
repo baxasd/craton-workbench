@@ -29,7 +29,14 @@ COLOR_CENTROID_SHADOW = "black"
 COLOR_ZERO_LINE = "rgba(255, 255, 255, 0.4)" 
 
 if getattr(sys, 'frozen', False):
-    ROOT_DIR = sys._MEIPASS
+    # In one-directory mode with contents_directory='libs', 
+    # the actual files are in the 'libs' folder.
+    root_base = sys._MEIPASS
+    libs_path = os.path.join(root_base, 'libs')
+    if os.path.exists(libs_path):
+        ROOT_DIR = libs_path
+    else:
+        ROOT_DIR = root_base
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +47,7 @@ LOGO_PATH = os.path.join(ROOT_DIR, 'assets', 'logo.png')
 ICON_PATH = os.path.join(ROOT_DIR, 'assets', 'icon.ico')
 COMMAND_ICON = os.path.join(ROOT_DIR, 'assets', 'command.ico')
 RADAR_CFG_PATH = os.path.join(ROOT_DIR, 'core', 'config.cfg')
-APP_VERSION = "v1.1.1"
+APP_VERSION = "0.1.0"
 
 # =============================================================================
 # 2. DATA STRUCTURES (MediaPipe Topology mapped to Math Engine Names)

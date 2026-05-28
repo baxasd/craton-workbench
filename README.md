@@ -1,73 +1,74 @@
 # Workbench
 
-![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
-![Streamlit](https://img.shields.io/badge/streamlit-1.57.0-FF4B4B?logo=streamlit&logoColor=white)
-![Plotly](https://img.shields.io/badge/plotly-6.7.0-3F4F75?logo=plotly&logoColor=white)
+Version: v0.1.0
 
-Workbench is designed for biomechanical gait analysis and radar signal processing, extension for the Project Craton, to analyse the recordings of mmWave radar and RealSense x MediaPipe Pose recordings.    
-Developed at the **University of Roehampton**
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.57.0-FF4B4B.svg?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Plotly](https://img.shields.io/badge/Plotly-6.7.0-3F4F75.svg?style=flat&logo=plotly&logoColor=white)](https://plotly.com/)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blueviolet.svg?style=flat)](/LICENSE)
 
----
+Workbench is a specialized analytics studio for biomechanical gait analysis and radar signal processing. It serves as the primary analysis suite for data captured via the Craton Vision and Craton Radar pipelines, providing research-grade visualizations and kinematic extraction.
 
-## Workflow
+## Architecture
 
+The workbench is structured to separate data processing logic from the interactive visualization layer:
 
-### DSP Pipeline
-Ensure your raw motion data is research-ready before analysis.
-*   **Teleport Removal**: Automatically detect and purge signal jumps based on Euclidean distance thresholds.
-*   **Linear Interpolation**: Repair tracking losses and data gaps
-*   **Signal Smoothing**: Apply center-aligned rolling mean filters to reduce high-frequency noise.
-*   **Export**: Download the cleaned dataset as a CSV for external use.
+*   **`core/logic.py`**: The central math engine. Handles DSP pipelines, biomechanical kinematic calculations, and radar centroid tracking.
+*   **`core/main.py`**: The Streamlit-based dashboard logic. Manages state, interactive widgets, and Plotly visualizations.
+*   **`core/config.cfg`**: Configuration storage for radar parameters and analysis thresholds.
+*   **`app.py`**: Desktop entry point launcher. Manages the Streamlit server lifecycle, environment paths (`libs`), and automatic browser launching.
 
-### Gait Analysis
-Generate postural and kinematic reports
-*   **Saggital Trunk Lean**: Accurate Saggital lean calculation using hip/shoulder midpoints to cancel reciprocal twisting.
-*   **Joint Kinematics**: High-fidelity angle calculations for Knee, Hip, Shoulder, and Elbow flexion.
-*   **Dynamic ROM**: 30-frame rolling Peak-to-Peak analysis for Range of Motion evaluation.
-*   **Temporal Grouping**: Export metrics at Frame-by-Frame, Second-by-Second, or Minute-by-Minute resolutions.
+## Analysis Capabilities
 
-### Micro-Doppler
-Process complex frequency-modulated continuous-wave (FMCW) radar signals.
-*   **Spectrogram Generation**: Advanced FFT-based Micro-Doppler visualization with noise-floor clutter removal.
-*   **Centroid Tracking**: Automatic extraction of human motion centroids from binary radar data.
-*   **Gait Metrics**: Detection of Steps, Cadence (SPM), Symmetry Asymmetry, and Path Drift.
-*   **Oscillation Dynamics**: Visualization of AC-coupled velocity components during gait.
+### 1. DSP Pipeline
+Pre-process raw motion data to ensure research-grade quality:
+*   **Teleport Removal**: Purge signal jumps using Euclidean distance thresholds.
+*   **Linear Interpolation**: Fill gaps in tracking data for continuous analysis.
+*   **Signal Smoothing**: Center-aligned rolling mean filters for noise reduction.
 
----
+### 2. Biomechanical Gait Analysis
+Extract high-fidelity kinematics from vision-based skeletal data:
+*   **Sagittal Trunk Lean**: Normalized calculation using shoulder/hip midpoints.
+*   **Joint Kinematics**: Flexion/Extension tracking for Knee, Hip, and Shoulder.
+*   **Dynamic ROM**: 30-frame rolling Peak-to-Peak Range of Motion evaluation.
 
-## 🛠️ Technical Stack
+### 3. Radar Dynamics
+Process complex FMCW radar signals from Craton Radar:
+*   **Micro-Doppler Spectrograms**: FFT-based visualization with clutter removal.
+*   **Centroid Extraction**: Automatic motion tracking from binary radar data.
+*   **Gait Metrics**: Extraction of cadence, step frequency, and symmetry.
 
-| Component | Technology 
-| :--- | :--- |
-| **Engine** | Python 3.12
-| **Frontend** | Streamlit
-| **Visualization**| Plotly 
-| **DSP** | SciPy
-| **Data** | Pandas / PyArrow
+## Installation & Usage
 
----
+### Setup
 
-## Installation
+1.  **Install dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-### Setup Environment
-```bash
-# Clone the repository
-git clone https://github.com/baxasd/Workbench.git
-cd Workbench
+### Execution
 
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Launch Workbench
-Run the main entry point to start the local server:
+Run the workbench locally:
 ```bash
 python app.py
 ```
-*The application is self-contained. Theme settings, server restrictions (localhost), and browser controls are managed automatically via the launcher.*
 
----
+### Build
 
-## ⚖️ License & Credits
-Developed at the **University of Roehampton**.
-Distributed under the MIT License. See `LICENSE.md` for details.
+To package the workbench as a standalone `x64` executable:
+
+**Windows**:
+```bash
+pyinstaller --clean tools/windows/build.spec
+```
+
+**Linux**:
+```bash
+pyinstaller --clean tools/linux/build.spec
+```
+
+## Contribution & License
+
+*   **License**: Distributed under the [Apache 2.0 License](/LICENSE).
+*   **Contributions**: Pull requests are welcome. For major changes, please open an issue first. PRs containing unreviewed, generated AI content will be closed.
