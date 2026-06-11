@@ -7,7 +7,6 @@ import pyarrow.parquet as pq
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 from scipy.signal import find_peaks, butter, filtfilt, welch
-from scipy.ndimage import uniform_filter1d
 
 # =============================================================================
 # 1. CONSTANTS & THEME
@@ -300,7 +299,9 @@ class RadarConfig:
         self.numLoops, Tc, fc = fr["numLoops"], (c["idleTime"] + c["rampEndTime"]) * 1e-6, c["startFreq"] * 1e9
         nc = (fr["chirpEndInd"] - fr["chirpStartInd"] + 1) * self.numLoops
         self.dopRes = 3e8 / (2 * fc * Tc * nc)
-        self.dopMax, self.T = nc * self.dopRes / 2, fr["periodicity"]
+        
+        # Max unambiguous Doppler velocity (v_max) should scale by numLoops, not total chirps (nc)
+        self.dopMax, self.T = self.numLoops * self.dopRes / 2, fr["periodicity"]
         self.frameRate = 1e3 / self.T
 
 class RecordingSession:
@@ -325,46 +326,49 @@ class RecordingSession:
     @property
     def duration_s(self): return (self.timestamps[-1] - self.timestamps[0]) if len(self.timestamps) > 1 else 0.0
 
-    def build_spectrogram(self, gate_lo_m, gate_hi_m, smooth_t=2, apply_mti=True, mti_weight=0.8):
-        from scipy.ndimage import uniform_filter1d, zoom
+    def build_spectrogram(self, gate_lo_m, gate_hi_m, apply_mti=True, mti_alpha=0.05, apply_cfar=False, cfar_thresh=3.0, cfar_train=2, cfar_guard=1):
         if not self.frames or self.cfg is None: return np.zeros((10,10)), np.zeros(10), np.zeros(10)
         cfg, nv = self.cfg, self.cfg.numLoops
         lo, hi = max(0, int(gate_lo_m / cfg.rangeRes)), min(cfg.numRangeBins, max(int(gate_lo_m/cfg.rangeRes)+1, int(gate_hi_m/cfg.rangeRes)))
         
-        raw_frames = np.array(self.frames)
-        if apply_mti:
-            # Proper Background Subtraction (MTI Filter) with adjustable weight
-            bg = np.median(raw_frames, axis=0)
-            clean_frames = np.maximum(raw_frames - (bg * mti_weight), 0)
+        # Cast to float64 to prevent overflow when calculating powers of 2
+        raw_frames = np.array(self.frames, dtype=np.float64)
+        
+        # Convert TI log2 format to true linear power (Amplitude^2)
+        # TI outputs 256 * log2(Amplitude), so Power = Amplitude^2 = 2 ** (raw / 128.0)
+        power_frames = 2.0 ** (raw_frames / 128.0)
+        
+        if apply_mti and len(power_frames) > 0:
+            clean_frames = np.zeros_like(power_frames)
+            bg = power_frames[0].copy()
+            for i in range(len(power_frames)):
+                bg = mti_alpha * power_frames[i] + (1 - mti_alpha) * bg
+                clean_frames[i] = np.maximum(power_frames[i] - bg, 0)
+            target_frames = clean_frames
         else:
-            clean_frames = raw_frames
+            target_frames = power_frames
 
-        spec_lin = np.abs(np.fft.fftshift(clean_frames[:, lo:hi, :].max(axis=1), axes=1))
-        spec_db = 20.0 * np.log10(spec_lin + 1e-9)
+        # Integrate linear power across range bins and center Doppler axis
+        spec_lin = np.fft.fftshift(target_frames[:, lo:hi, :].sum(axis=1), axes=1)
         
-        # Softly cap the exact center bin instead of aggressive deletion
-        c_idx = nv // 2
-        spec_db[:, c_idx] = np.clip(spec_db[:, c_idx], a_min=None, a_max=np.percentile(spec_db, 95))
-        
-        if smooth_t > 1: spec_db = uniform_filter1d(spec_db, size=smooth_t, axis=0)
-        spec_db = zoom(spec_db, (1, 8), order=3)
-        return spec_db, np.array([t - self.timestamps[0] for t in self.timestamps], dtype=np.float32), np.linspace(-cfg.dopMax, cfg.dopMax, nv * 8, dtype=np.float32)
+        if apply_cfar:
+            from scipy.ndimage import convolve
+            t, g = int(cfar_train), int(cfar_guard)
+            win_size = 2 * (t + g) + 1
+            mask = np.ones((win_size, win_size))
+            mask[t:t+2*g+1, t:t+2*g+1] = 0
+            mask_sum = np.sum(mask)
+            if mask_sum > 0:
+                mask = mask / mask_sum
+                # Use 'reflect' to prevent edge threshold drops
+                local_mean = convolve(spec_lin, mask, mode='reflect')
+                cfar_mask = spec_lin > (local_mean * cfar_thresh)
+                spec_lin = np.where(cfar_mask, spec_lin, 1e-9)
 
-def analyze_gait_radar(spec_db, time, velocities, cfg):
-    """
-    Analyzes gait from the micro-Doppler spectrogram.
-    Extracts foundational signal quality metrics.
-    """
-    if spec_db is None or spec_db.size == 0: return {"snr_db": 0.0, "quality": "Poor"}
-    
-    # Calculate Signal-to-Noise Ratio (SNR)
-    # spec_db is already in logarithmic scale (dB), so ratio is subtraction
-    noise_floor = float(np.median(spec_db))
-    signal_peak = float(np.max(spec_db))
-    snr_db = max(0.0, signal_peak - noise_floor)
-    
-    return {
-        "snr_db": snr_db,
-        "quality": "Good" if snr_db > 15.0 else "Poor"
-    }
+        # Convert integrated linear power to standard Decibels (10 * log10(power))
+        spec_db = 10.0 * np.log10(spec_lin + 1e-9)
+        
+        return spec_db, np.array([t - self.timestamps[0] for t in self.timestamps], dtype=np.float32), np.linspace(-cfg.dopMax, cfg.dopMax, nv, dtype=np.float32)
+
 # Force reload
+

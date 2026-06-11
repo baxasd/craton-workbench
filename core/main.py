@@ -22,12 +22,11 @@ def get_radar_session(radar_bytes):
     return sess
 
 @st.cache_data(show_spinner="Performing DSP Analysis...")
-def get_radar_analysis(radar_bytes, r_lo, r_hi, v_sc, apply_mti, mti_weight, snr_th):
+def get_radar_analysis(radar_bytes, r_lo, r_hi, apply_mti, mti_alpha, apply_cfar, cfar_thresh, cfar_train, cfar_guard):
     sess = get_radar_session(radar_bytes)
-    if not sess: return None, None, None, None
-    spec, t, v = sess.build_spectrogram(float(r_lo), float(r_hi), 3, apply_mti, float(mti_weight))
-    g = logic.analyze_gait_radar(spec, t, v, {"velocity_scale": float(v_sc), "snr_threshold": float(snr_th)})
-    return spec, t, v, g
+    if not sess: return None, None, None
+    spec, t, v = sess.build_spectrogram(float(r_lo), float(r_hi), apply_mti, float(mti_alpha), apply_cfar, float(cfar_thresh), int(cfar_train), int(cfar_guard))
+    return spec, t, v
 
 @st.cache_data(show_spinner="Generating Biomechanical Report...")
 def process_analysis_data(df_raw):
@@ -245,24 +244,29 @@ def main():
             # Inline Radar Controls
             with st.container(border=True):
                 st.markdown("**Radar Processing Parameters**")
-                c1, c2, c3 = st.columns(3)
+                c1, c2, c3, c4 = st.columns(4)
                 with c1:
                     r_lo = st.number_input("Min Range (m)", 0.0, 10.0, 0.0)
-                    r_hi = st.number_input("Max Range (m)", 0.1, 20.0, 5.0)
                 with c2:
-                    v_sc = st.number_input("Velocity Scale", 0.001, 1.0, 0.1333, format="%.4f")
-                    snr_th = st.number_input("SNR Quality Threshold (dB)", 5.0, 40.0, 15.0, 1.0)
+                    r_hi = st.number_input("Max Range (m)", 0.1, 20.0, 5.0)
                 with c3:
-                    apply_mti = st.checkbox("Apply MTI Filter (Clutter Removal)", True)
-                    mti_weight = st.slider("MTI Strength", 0.0, 1.0, 0.8, 0.05, help="1.0 completely removes the median background. Lower values preserve more detail but leave more clutter.")
+                    apply_mti = st.checkbox("Apply Causal MTI", True)
+                with c4:
+                    mti_alpha = st.slider("MTI Learning Rate", 0.001, 0.1, 0.05, 0.001)
+                    
+                st.markdown("**CFAR Parameters**")
+                cf1, cf2, cf3, cf4 = st.columns(4)
+                with cf1:
+                    apply_cfar = st.checkbox("Apply 2D CFAR", False)
+                with cf2:
+                    cfar_thresh = st.number_input("Threshold Factor", 1.0, 10.0, 3.0, 0.1)
+                with cf3:
+                    cfar_train = st.number_input("Training Cells", 1, 50, 2)
+                with cf4:
+                    cfar_guard = st.number_input("Guard Cells", 0, 20, 1)
 
-            spec, t, v, g = get_radar_analysis(st.session_state.radar_bytes, r_lo, r_hi, v_sc, apply_mti, mti_weight, snr_th)
+            spec, t, v = get_radar_analysis(st.session_state.radar_bytes, r_lo, r_hi, apply_mti, mti_alpha, apply_cfar, cfar_thresh, cfar_train, cfar_guard)
             if spec is not None:
-                st.subheader("Signal Quality")
-                sq1, sq2 = st.columns(2)
-                sq1.metric("Signal-to-Noise Ratio", f"{g.get('snr_db', 0.0):.1f} dB")
-                sq2.metric("Quality Assessment", g.get('quality', 'Unknown'))
-
                 with st.container(border=True):
                     fig_spec = go.Figure(go.Heatmap(
                         z=spec.T, x=t, y=v, 
@@ -271,8 +275,6 @@ def main():
                         zmax=float(np.percentile(spec, 99.5)),
                         showscale=False
                     ))
-                    fig_spec.add_trace(go.Scatter(x=t, y=g.get('upper_env', []), mode='lines', line=dict(color='rgba(255, 255, 255, 0.8)', width=1.5, dash='dash'), name='Upper Env'))
-                    fig_spec.add_trace(go.Scatter(x=t, y=g.get('lower_env', []), mode='lines', line=dict(color='rgba(255, 255, 255, 0.8)', width=1.5, dash='dash'), name='Lower Env'))
                     fig_spec.update_layout(title="Micro-Doppler Spectrogram", height=400, template="plotly_dark", margin=dict(l=0, r=0, t=50, b=0))
                     st.plotly_chart(fig_spec, use_container_width=True)
 
